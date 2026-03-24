@@ -11,7 +11,7 @@ export default async function Home() {
         <div className="mb-8">
           <h1 className="text-4xl font-bold mb-3">🎙️ AI Dubbing</h1>
           <p className="text-gray-300 text-lg">
-            오디오/비디오 파일을 원하는 언어로 자동 더빙해드립니다
+            오디오/비디오 파일을 원하는 언어로 자동 더빙해드립니다😃
           </p>
         </div>
 
