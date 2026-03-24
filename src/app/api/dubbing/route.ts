@@ -4,13 +4,6 @@ import OpenAI from "openai";
 
 export const maxDuration = 120; // 2분 타임아웃
 
-export const config = {
-  api: {
-    bodyParser: false,
-    responseLimit: false,
-  },
-};
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY!;
