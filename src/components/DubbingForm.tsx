@@ -25,6 +25,8 @@ const STATUS_MESSAGES: Record<Status, string> = {
   error: "오류가 발생했습니다",
 };
 
+const STEPS: Status[] = ["uploading", "transcribing", "translating", "synthesizing", "done"];
+
 export default function DubbingForm() {
   const [file, setFile] = useState<File | null>(null);
   const [targetLang, setTargetLang] = useState("en");
@@ -79,10 +81,14 @@ export default function DubbingForm() {
     }
   };
 
+  const isProcessing = status !== "idle" && status !== "done" && status !== "error";
+  const currentStepIndex = STEPS.indexOf(status);
+
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {/* 파일 업로드 */}
-      <div className="border-2 border-dashed border-gray-600 rounded-2xl p-8 text-center hover:border-gray-400 transition-colors">
+
+      {/* 파일 업로드 드롭존 */}
+      <div className="group relative">
         <input
           type="file"
           accept="audio/*,video/*"
@@ -90,75 +96,157 @@ export default function DubbingForm() {
           className="hidden"
           id="file-input"
         />
-        <label htmlFor="file-input" className="cursor-pointer">
-          <div className="text-4xl mb-3">📁</div>
-          {file ? (
-            <div>
-              <p className="font-semibold text-green-400">{file.name}</p>
-              <p className="text-gray-400 text-sm mt-1">
-                {(file.size / 1024 / 1024).toFixed(2)} MB
-              </p>
+        <label htmlFor="file-input" className="cursor-pointer block">
+          <div className={`
+            relative border-2 border-dashed rounded-2xl p-10 text-center
+            transition-all duration-300
+            ${file
+              ? "border-blue-400/50 bg-blue-500/5"
+              : "border-white/15 hover:border-white/30 bg-white/3 hover:bg-white/5"
+            }
+          `}>
+            {/* 아이콘 */}
+            <div className={`
+              w-16 h-16 mx-auto mb-4 rounded-2xl flex items-center justify-center text-2xl
+              transition-all duration-300
+              ${file
+                ? "bg-gradient-to-br from-blue-500/30 to-violet-500/30 shadow-lg shadow-blue-500/10"
+                : "bg-white/5 group-hover:bg-white/10"
+              }
+            `}>
+              {file ? "🎵" : "☁️"}
             </div>
-          ) : (
-            <div>
-              <p className="font-semibold">파일을 클릭하여 업로드</p>
-              <p className="text-gray-400 text-sm mt-1">오디오 또는 비디오 파일 지원</p>
-            </div>
-          )}
+
+            {file ? (
+              <div>
+                <p className="font-semibold text-blue-300 text-sm mb-1 truncate max-w-xs mx-auto">
+                  {file.name}
+                </p>
+                <p className="text-white/30 text-xs">
+                  {(file.size / 1024 / 1024).toFixed(2)} MB
+                </p>
+                <span className="inline-block mt-3 text-xs text-white/40 bg-white/5 border border-white/10 rounded-full px-3 py-1">
+                  클릭하여 변경
+                </span>
+              </div>
+            ) : (
+              <div>
+                <p className="font-semibold text-white/70 text-sm mb-1">
+                  파일을 클릭하여 업로드
+                </p>
+                <p className="text-white/30 text-xs">
+                  오디오 또는 비디오 파일 지원
+                </p>
+              </div>
+            )}
+          </div>
         </label>
       </div>
 
       {/* 언어 선택 */}
-      <div>
-        <label className="block text-sm font-medium text-gray-300 mb-2">
+      <div className="space-y-2">
+        <label className="block text-xs font-medium text-white/40 uppercase tracking-wider">
           타겟 언어
         </label>
-        <select
-          value={targetLang}
-          onChange={(e) => setTargetLang(e.target.value)}
-          className="w-full bg-gray-800 border border-gray-600 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-blue-500"
-        >
-          {LANGUAGES.map((lang) => (
-            <option key={lang.code} value={lang.code}>
-              {lang.label}
-            </option>
-          ))}
-        </select>
+        <div className="relative">
+          <select
+            value={targetLang}
+            onChange={(e) => setTargetLang(e.target.value)}
+            className="w-full appearance-none bg-white/5 border border-white/10 hover:border-white/20 focus:border-blue-400/50 focus:bg-white/8 rounded-xl px-4 py-3 text-white text-sm focus:outline-none transition-all duration-200 cursor-pointer backdrop-blur-sm"
+          >
+            {LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code} className="bg-gray-900 text-white">
+                {lang.label}
+              </option>
+            ))}
+          </select>
+          {/* 커스텀 화살표 */}
+          <div className="pointer-events-none absolute inset-y-0 right-4 flex items-center">
+            <svg className="w-4 h-4 text-white/30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
+            </svg>
+          </div>
+        </div>
       </div>
 
       {/* 제출 버튼 */}
       <button
         type="submit"
-        disabled={!file || status !== "idle" && status !== "done" && status !== "error"}
-        className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:cursor-not-allowed font-semibold py-3 rounded-xl transition-colors"
+        disabled={!file || isProcessing}
+        className={`
+          relative w-full font-semibold py-3.5 rounded-xl text-sm
+          transition-all duration-300 overflow-hidden
+          ${!file || isProcessing
+            ? "bg-white/5 border border-white/10 text-white/30 cursor-not-allowed"
+            : "bg-gradient-to-r from-blue-500 to-violet-500 hover:from-blue-400 hover:to-violet-400 text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.01] active:scale-[0.99]"
+          }
+        `}
       >
-        {status !== "idle" && status !== "done" && status !== "error"
-          ? STATUS_MESSAGES[status]
-          : "더빙 시작"}
+        {isProcessing ? (
+          <span className="flex items-center justify-center gap-2">
+            <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            {STATUS_MESSAGES[status]}
+          </span>
+        ) : (
+          "더빙 시작"
+        )}
       </button>
 
-      {/* 진행 상태 */}
+      {/* 진행 상태 카드 */}
       {status !== "idle" && status !== "error" && (
-        <div className="bg-gray-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            {status !== "done" && (
-              <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        <div className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-4 backdrop-blur-sm">
+          {/* 스텝 인디케이터 */}
+          <div className="flex items-center gap-1.5">
+            {STEPS.map((step, idx) => {
+              const isCompleted = currentStepIndex > idx || status === "done";
+              const isActive = currentStepIndex === idx && status !== "done";
+              return (
+                <div key={step} className="flex items-center gap-1.5 flex-1">
+                  <div className={`
+                    h-1.5 flex-1 rounded-full transition-all duration-500
+                    ${isCompleted ? "bg-gradient-to-r from-blue-400 to-violet-400"
+                      : isActive ? "bg-blue-400/50 animate-pulse"
+                      : "bg-white/10"
+                    }
+                  `} />
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 상태 텍스트 */}
+          <div className="flex items-center gap-2.5">
+            {status !== "done" ? (
+              <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+            ) : (
+              <div className="w-4 h-4 rounded-full bg-gradient-to-br from-blue-400 to-violet-400 flex items-center justify-center flex-shrink-0">
+                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
             )}
-            <span className={status === "done" ? "text-green-400 font-semibold" : "text-blue-400"}>
+            <span className={`text-sm font-medium ${status === "done" ? "text-blue-300" : "text-white/60"}`}>
               {STATUS_MESSAGES[status]}
             </span>
           </div>
 
+          {/* 원본 텍스트 */}
           {transcript && (
-            <div className="mt-3">
-              <p className="text-xs text-gray-500 mb-1">원본 텍스트</p>
-              <p className="text-sm text-gray-300 bg-gray-900 rounded-lg p-3">{transcript}</p>
+            <div className="space-y-1.5">
+              <p className="text-xs text-white/30 font-medium uppercase tracking-wider">원본 텍스트</p>
+              <p className="text-xs text-white/60 bg-white/5 border border-white/8 rounded-xl p-3 leading-relaxed">
+                {transcript}
+              </p>
             </div>
           )}
+
+          {/* 번역된 텍스트 */}
           {translation && (
-            <div className="mt-3">
-              <p className="text-xs text-gray-500 mb-1">번역된 텍스트</p>
-              <p className="text-sm text-gray-300 bg-gray-900 rounded-lg p-3">{translation}</p>
+            <div className="space-y-1.5">
+              <p className="text-xs text-white/30 font-medium uppercase tracking-wider">번역된 텍스트</p>
+              <p className="text-xs text-white/60 bg-white/5 border border-white/8 rounded-xl p-3 leading-relaxed">
+                {translation}
+              </p>
             </div>
           )}
         </div>
@@ -166,23 +254,44 @@ export default function DubbingForm() {
 
       {/* 에러 */}
       {status === "error" && (
-        <div className="bg-red-900/30 border border-red-700 rounded-xl p-4 text-red-400">
-          {error}
+        <div className="flex items-start gap-3 bg-red-500/8 border border-red-400/20 rounded-xl p-4">
+          <div className="w-5 h-5 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <svg className="w-3 h-3 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </div>
+          <p className="text-sm text-red-300/80">{error}</p>
         </div>
       )}
 
-      {/* 결과 오디오 */}
+      {/* 결과 오디오 플레이어 */}
       {audioUrl && (
-        <div className="bg-gray-800 rounded-2xl p-6 space-y-4">
-          <h3 className="font-semibold text-green-400">더빙 결과</h3>
-          <audio ref={audioRef} controls src={audioUrl} className="w-full" />
-          <a
-            href={audioUrl}
-            download={`dubbed_${targetLang}.mp3`}
-            className="flex items-center justify-center gap-2 w-full bg-green-700 hover:bg-green-600 font-semibold py-2.5 rounded-xl transition-colors"
-          >
-            ⬇️ 다운로드
-          </a>
+        <div className="relative">
+          <div className="absolute -inset-px rounded-2xl bg-gradient-to-br from-blue-500/15 to-violet-500/15" />
+          <div className="relative bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4 backdrop-blur-sm">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-gradient-to-r from-blue-400 to-violet-400 animate-pulse" />
+              <h3 className="text-sm font-semibold text-white/80">더빙 결과</h3>
+            </div>
+
+            <audio
+              ref={audioRef}
+              controls
+              src={audioUrl}
+              className="w-full h-10 [&::-webkit-media-controls-panel]:bg-white/5 rounded-lg"
+            />
+
+            <a
+              href={audioUrl}
+              download={`dubbed_${targetLang}.mp3`}
+              className="flex items-center justify-center gap-2 w-full bg-white/8 hover:bg-white/12 border border-white/10 hover:border-white/20 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/70 hover:text-white"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+              </svg>
+              다운로드
+            </a>
+          </div>
         </div>
       )}
     </form>
