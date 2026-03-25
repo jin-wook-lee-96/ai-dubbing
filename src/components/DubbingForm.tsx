@@ -137,6 +137,9 @@ export default function DubbingForm() {
                 <p className="text-white/30 text-xs">
                   오디오 또는 비디오 파일 지원
                 </p>
+                <span className="inline-block mt-3 text-xs text-amber-400/70 bg-amber-500/10 border border-amber-500/20 rounded-full px-3 py-1">
+                  최대 50MB
+                </span>
               </div>
             )}
           </div>
