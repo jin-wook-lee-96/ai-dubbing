@@ -129,6 +129,9 @@ TURSO_AUTH_TOKEN=your_turso_auth_token
 
 # Vercel Blob (대용량 파일 업로드)
 BLOB_READ_WRITE_TOKEN=your_vercel_blob_token
+
+# 초기 허용 이메일 목록 (DB 초기화 시 자동 등록, 쉼표로 구분)
+INITIAL_ALLOWED_EMAILS=email1@example.com,email2@example.com
 ```
 
 ### 데이터베이스 초기화
@@ -140,7 +143,7 @@ curl http://localhost:3000/api/db-init
 # → {"success":true,"message":"DB initialized"}
 ```
 
-허용 사용자 이메일은 `src/app/api/db-init/route.ts`에서 수정합니다.
+허용 사용자 이메일은 `.env.local`의 `INITIAL_ALLOWED_EMAILS` 환경변수로 설정합니다 (쉼표로 구분, 예: `email1@example.com,email2@example.com`). `/api/db-init` 호출은 인증된 세션이 있어야 합니다.
 
 ### 빌드 및 기타 명령어
 
@@ -173,7 +176,7 @@ npm run lint     # ESLint 검사
 
 ### 사용한 에이전트
 
-프로젝트 루트 `.claude/agents/` 디렉터리에 정의된 4개의 전문 에이전트:
+프로젝트 루트 `.claude/agents/` 디렉터리에 정의된 5개의 전문 에이전트:
 
 | 에이전트 | 역할 | 호출 상황 |
 |----------|------|-----------|
@@ -181,6 +184,7 @@ npm run lint     # ESLint 검사
 | `frontend-senior-dev` | 프론트엔드 구현 | UI 컴포넌트 개발, 반응형 구현 |
 | `senior-web-designer` | UI/UX 디자인 | 레이아웃, 색상 시스템, 컴포넌트 디자인 |
 | `senior-pm-writer` | 문서 작성 및 정리 | README, 요구사항 문서, 보고서 |
+| `security-auditor` | 보안 감사 및 취약점 점검 | API 통합, 인증 코드, 보안 리뷰 필요 시 |
 
 각 에이전트는 `.claude/agent-memory/[agent-name]/` 경로에 대화 간 지속되는 메모리를 유지합니다.
 
@@ -225,6 +229,32 @@ Vercel Hobby 플랜은 요청 본문 **4.5MB 제한**이 있습니다.
 
 이 프로젝트는 표준 Next.js와 다른 버전을 사용합니다.
 `AGENTS.md`에 이 사실을 명시해두면 에이전트가 `node_modules/next/dist/docs/`를 먼저 확인하고 잘못된 API를 사용하지 않습니다.
+
+---
+
+## 6. 보안
+
+### 적용된 보안 조치
+
+| # | 항목 | 설명 |
+|---|------|------|
+| 1 | **DB 초기화 인증** | `/api/db-init` 엔드포인트에 `auth()` 세션 검증 추가 — 인증된 사용자만 DB 초기화 가능 |
+| 2 | **허용 이메일 환경변수화** | 하드코딩되어 있던 초기 허용 이메일을 `INITIAL_ALLOWED_EMAILS` 환경변수로 분리하여 소스 코드 노출 방지 |
+| 3 | **SSRF 방어** | `/api/dubbing`에서 `blobUrl` 처리 전 도메인 화이트리스트 검증 추가 — 임의 내부망 URL 요청 차단 |
+| 4 | **입력값 허용 목록** | `targetLang` 파라미터에 허용 언어 목록(allowlist) 적용 — 헤더/프롬프트 인젝션 방지 |
+| 5 | **에러 메시지 sanitize** | API 응답에서 내부 스택 트레이스 및 경로 등 민감 정보를 제거하고 일반화된 메시지만 반환 |
+| 6 | **보안 HTTP 헤더** | `next.config.ts`에 `X-Frame-Options`, `Strict-Transport-Security`, `Content-Security-Policy` 등 보안 헤더 적용 |
+
+### security-auditor 에이전트
+
+`.claude/agents/security-auditor` 에이전트는 Senior Security Engineer 페르소나로 동작하며, 다음 항목을 자동으로 감사합니다:
+
+- 시크릿·자격증명·API 토큰 노출 여부
+- 인증/인가 흐름의 취약점
+- OWASP Top 10 취약점 점검
+- 입력값 및 출력값 sanitization 검증
+
+API 통합 코드 작성, 인증 로직 수정, 보안 리뷰가 필요한 시점에 자동으로 호출됩니다.
 
 ---
 
