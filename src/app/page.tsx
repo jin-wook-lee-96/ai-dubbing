@@ -16,7 +16,7 @@ export default async function Home() {
         playsInline
         className="absolute inset-0 w-full h-full object-cover z-0"
       >
-        <source src="/2page_vedio.mp4" type="video/mp4" />
+        <source src="/9255102-hd_1920_1080_24fps.mp4" type="video/mp4" />
       </video>
 
       {/* 어두운 오버레이 */}

@@ -16,7 +16,7 @@ export default async function Dashboard() {
         playsInline
         className="fixed inset-0 w-full h-full object-cover -z-10"
       >
-        <source src="/2page_vedio.mp4" type="video/mp4" />
+        <source src="/9255102-hd_1920_1080_24fps.mp4" type="video/mp4" />
       </video>
       {/* 어두운 오버레이 */}
       <div className="fixed inset-0 bg-black/60 -z-10" />
