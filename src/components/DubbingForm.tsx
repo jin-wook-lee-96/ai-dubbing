@@ -260,7 +260,7 @@ export default function DubbingForm() {
                 </p>
                 <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
                   <span className="text-xs text-amber-400/70 bg-amber-500/10 border border-amber-500/20 rounded-full px-3 py-1">
-                    최대 50MB
+                    50MB 이하 권장
                   </span>
                   <span className="text-xs text-blue-400/70 bg-blue-500/10 border border-blue-500/20 rounded-full px-3 py-1">
                     1분 초과 시 자동 크롭
