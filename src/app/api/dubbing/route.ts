@@ -24,9 +24,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Missing blobUrl or targetLang" }, { status: 400 });
   }
 
+  // targetLang 허용 목록 검증 (헤더 인젝션 및 프롬프트 인젝션 방지)
+  const ALLOWED_LANGS = new Set(["ko", "en", "ja", "zh", "es", "fr", "de", "vi", "th", "id"]);
+  if (!ALLOWED_LANGS.has(targetLang)) {
+    return NextResponse.json({ error: "지원하지 않는 언어입니다." }, { status: 400 });
+  }
+
+  // blobUrl SSRF 방지: Vercel Blob 도메인만 허용
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(blobUrl);
+  } catch {
+    return NextResponse.json({ error: "유효하지 않은 blobUrl입니다." }, { status: 400 });
+  }
+  if (
+    parsedUrl.protocol !== "https:" ||
+    !parsedUrl.hostname.endsWith("blob.vercel-storage.com")
+  ) {
+    return NextResponse.json({ error: "허용되지 않는 URL입니다." }, { status: 400 });
+  }
+
   try {
     // Blob에서 파일 fetch
-    const fileRes = await fetch(blobUrl);
+    const fileRes = await fetch(parsedUrl.toString());
     if (!fileRes.ok) throw new Error("Failed to fetch uploaded file");
     const fileBlob = await fileRes.blob();
     const fileName = blobUrl.split("/").pop() ?? "audio_file";
@@ -97,7 +117,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error("Dubbing error:", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Dubbing failed" },
+      { error: "더빙 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요." },
       { status: 500 }
     );
   }
