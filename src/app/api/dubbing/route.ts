@@ -18,18 +18,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const formData = await req.formData();
-  const file = formData.get("file") as File;
-  const targetLang = formData.get("targetLang") as string;
+  const { blobUrl, targetLang } = await req.json();
 
-  if (!file || !targetLang) {
-    return NextResponse.json({ error: "Missing file or targetLang" }, { status: 400 });
+  if (!blobUrl || !targetLang) {
+    return NextResponse.json({ error: "Missing blobUrl or targetLang" }, { status: 400 });
   }
 
   try {
+    // Blob에서 파일 fetch
+    const fileRes = await fetch(blobUrl);
+    if (!fileRes.ok) throw new Error("Failed to fetch uploaded file");
+    const fileBlob = await fileRes.blob();
+    const fileName = blobUrl.split("/").pop() ?? "audio_file";
+
     // Step 1: ElevenLabs STT — 음성 → 텍스트
     const sttFormData = new FormData();
-    sttFormData.append("file", file);
+    sttFormData.append("file", fileBlob, fileName);
     sttFormData.append("model_id", "scribe_v1");
 
     const sttRes = await fetch(`${ELEVENLABS_BASE}/speech-to-text`, {

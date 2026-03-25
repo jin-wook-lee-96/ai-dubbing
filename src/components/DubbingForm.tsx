@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import { upload } from "@vercel/blob/client";
 
 const LANGUAGES = [
   { code: "ko", label: "한국어" },
@@ -44,15 +45,18 @@ export default function DubbingForm() {
     setTranscript("");
     setTranslation("");
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("targetLang", targetLang);
-
     try {
+      // Step 1: Vercel Blob에 직접 업로드 (4.5MB 제한 우회)
+      const blob = await upload(file.name, file, {
+        access: "public",
+        handleUploadUrl: "/api/blob-upload",
+      });
+
       setStatus("transcribing");
       const res = await fetch("/api/dubbing", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ blobUrl: blob.url, targetLang }),
       });
 
       if (!res.ok) {
@@ -61,8 +65,8 @@ export default function DubbingForm() {
       }
 
       setStatus("done");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      const audioBlob = await res.blob();
+      const url = URL.createObjectURL(audioBlob);
       setAudioUrl(url);
 
       const transcriptHeader = res.headers.get("X-Transcript");
