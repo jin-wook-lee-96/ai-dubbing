@@ -13,10 +13,11 @@ const LANGUAGES = [
   { code: "de", label: "Deutsch" },
 ];
 
-type Status = "idle" | "uploading" | "transcribing" | "translating" | "synthesizing" | "done" | "error";
+type Status = "idle" | "cropping" | "uploading" | "transcribing" | "translating" | "synthesizing" | "done" | "error";
 
 const STATUS_MESSAGES: Record<Status, string> = {
   idle: "",
+  cropping: "1분으로 자동 크롭 중...",
   uploading: "파일 업로드 중...",
   transcribing: "음성을 텍스트로 변환 중...",
   translating: "번역 중...",
@@ -27,29 +28,137 @@ const STATUS_MESSAGES: Record<Status, string> = {
 
 const STEPS: Status[] = ["uploading", "transcribing", "translating", "synthesizing", "done"];
 
+const MAX_DURATION_SEC = 60;
+
+async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: boolean }> {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
+  const ctx = new AudioCtx();
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    let decoded: AudioBuffer;
+
+    try {
+      decoded = await ctx.decodeAudioData(arrayBuffer);
+    } catch {
+      // 디코딩 불가 포맷(일부 비디오 컨테이너 등) — 원본 그대로 반환
+      await ctx.close();
+      return { file, wasCropped: false };
+    }
+
+    if (decoded.duration <= MAX_DURATION_SEC) {
+      await ctx.close();
+      return { file, wasCropped: false };
+    }
+
+    // 60초로 크롭
+    const sr = decoded.sampleRate;
+    const channels = decoded.numberOfChannels;
+    const frames = Math.floor(MAX_DURATION_SEC * sr);
+    const cropped = ctx.createBuffer(channels, frames, sr);
+
+    for (let c = 0; c < channels; c++) {
+      cropped.getChannelData(c).set(decoded.getChannelData(c).subarray(0, frames));
+    }
+
+    if (typeof MediaRecorder === "undefined") {
+      await ctx.close();
+      throw new Error(
+        "이 브라우저에서는 자동 크롭을 지원하지 않습니다. 1분 미만 파일을 업로드해주세요."
+      );
+    }
+
+    const mimeType =
+      ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"].find(
+        (t) => MediaRecorder.isTypeSupported(t)
+      ) ?? "";
+
+    const dest = ctx.createMediaStreamDestination();
+    const src = ctx.createBufferSource();
+    src.buffer = cropped;
+    src.connect(dest);
+
+    const recorder = new MediaRecorder(dest.stream, mimeType ? { mimeType } : {});
+    const chunks: Blob[] = [];
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType }));
+      recorder.onerror = () => reject(new Error("크롭 인코딩 실패"));
+      recorder.start();
+      src.start(0);
+      src.onended = () => recorder.stop();
+    });
+
+    await ctx.close();
+
+    const ext = recorder.mimeType.split("/")[1]?.split(";")[0] ?? "webm";
+    const baseName = file.name.replace(/\.[^.]+$/, "");
+    const croppedFile = new File([blob], `${baseName}_cropped.${ext}`, { type: blob.type });
+
+    return { file: croppedFile, wasCropped: true };
+  } catch (err) {
+    try { await ctx.close(); } catch { /* ignore */ }
+    throw err;
+  }
+}
+
 export default function DubbingForm() {
   const [file, setFile] = useState<File | null>(null);
+  const [fileDuration, setFileDuration] = useState<number | null>(null);
   const [targetLang, setTargetLang] = useState("en");
   const [status, setStatus] = useState<Status>("idle");
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [transcript, setTranscript] = useState("");
   const [translation, setTranslation] = useState("");
   const [error, setError] = useState("");
+  const [wasCropped, setWasCropped] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  const handleFileChange = (newFile: File | null) => {
+    setFile(newFile);
+    setFileDuration(null);
+    setWasCropped(false);
+    if (!newFile) return;
+
+    const url = URL.createObjectURL(newFile);
+    const audio = new Audio();
+    audio.onloadedmetadata = () => {
+      setFileDuration(audio.duration);
+      URL.revokeObjectURL(url);
+    };
+    audio.onerror = () => URL.revokeObjectURL(url);
+    audio.src = url;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file) return;
 
-    setStatus("uploading");
     setAudioUrl(null);
     setError("");
     setTranscript("");
     setTranslation("");
+    setWasCropped(false);
+
+    let fileToUpload = file;
 
     try {
+      // Step 0: 필요 시 1분 크롭 (클라이언트)
+      if (fileDuration === null || fileDuration > MAX_DURATION_SEC) {
+        setStatus("cropping");
+        const result = await cropToOneMinute(file);
+        fileToUpload = result.file;
+        if (result.wasCropped) setWasCropped(true);
+      }
+
       // Step 1: Vercel Blob에 직접 업로드 (4.5MB 제한 우회)
-      const blob = await upload(file.name, file, {
+      setStatus("uploading");
+      const blob = await upload(fileToUpload.name, fileToUpload, {
         access: "public",
         handleUploadUrl: "/api/blob-upload",
       });
@@ -84,6 +193,12 @@ export default function DubbingForm() {
   const isProcessing = status !== "idle" && status !== "done" && status !== "error";
   const currentStepIndex = STEPS.indexOf(status);
 
+  const formatDuration = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return m > 0 ? `${m}분 ${s}초` : `${s}초`;
+  };
+
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
 
@@ -92,7 +207,7 @@ export default function DubbingForm() {
         <input
           type="file"
           accept="audio/*,video/*"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
           className="hidden"
           id="file-input"
         />
@@ -124,7 +239,13 @@ export default function DubbingForm() {
                 </p>
                 <p className="text-white/30 text-xs">
                   {(file.size / 1024 / 1024).toFixed(2)} MB
+                  {fileDuration !== null && ` · ${formatDuration(fileDuration)}`}
                 </p>
+                {fileDuration !== null && fileDuration > MAX_DURATION_SEC && (
+                  <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded-full px-3 py-1">
+                    앞 1분 자동 크롭
+                  </span>
+                )}
                 <span className="inline-block mt-3 text-xs text-white/40 bg-white/5 border border-white/10 rounded-full px-3 py-1">
                   클릭하여 변경
                 </span>
@@ -137,9 +258,14 @@ export default function DubbingForm() {
                 <p className="text-white/30 text-xs">
                   오디오 또는 비디오 파일 지원
                 </p>
-                <span className="inline-block mt-3 text-xs text-amber-400/70 bg-amber-500/10 border border-amber-500/20 rounded-full px-3 py-1">
-                  최대 50MB
-                </span>
+                <div className="flex items-center justify-center gap-2 mt-3 flex-wrap">
+                  <span className="text-xs text-amber-400/70 bg-amber-500/10 border border-amber-500/20 rounded-full px-3 py-1">
+                    최대 50MB
+                  </span>
+                  <span className="text-xs text-blue-400/70 bg-blue-500/10 border border-blue-500/20 rounded-full px-3 py-1">
+                    1분 초과 시 자동 크롭
+                  </span>
+                </div>
               </div>
             )}
           </div>
@@ -195,8 +321,8 @@ export default function DubbingForm() {
         )}
       </button>
 
-      {/* 진행 상태 카드 */}
-      {status !== "idle" && status !== "error" && (
+      {/* 진행 상태 카드 (서버 파이프라인) */}
+      {status !== "idle" && status !== "cropping" && status !== "error" && (
         <div className="bg-white/5 border border-white/10 rounded-2xl p-5 space-y-4 backdrop-blur-sm">
           {/* 스텝 인디케이터 */}
           <div className="flex items-center gap-1.5">
@@ -232,6 +358,16 @@ export default function DubbingForm() {
               {STATUS_MESSAGES[status]}
             </span>
           </div>
+
+          {/* 크롭 알림 */}
+          {wasCropped && (
+            <div className="flex items-center gap-2 text-xs text-amber-400/70">
+              <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              앞 1분이 자동 크롭되어 처리되었습니다
+            </div>
+          )}
 
           {/* 원본 텍스트 */}
           {transcript && (
