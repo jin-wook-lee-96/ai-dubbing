@@ -22,6 +22,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             "video/mp4", "video/webm", "video/quicktime", "video/*",
           ],
           maximumSizeInBytes: 50 * 1024 * 1024, // 50MB
+          addRandomSuffix: true,
         };
       },
       onUploadCompleted: async ({ blob }) => {
