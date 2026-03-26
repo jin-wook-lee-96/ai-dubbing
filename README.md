@@ -4,7 +4,7 @@
 
 **배포 URL:** https://ai-dubbing-seven.vercel.app
 
-<video src="public/데모 오디오포함 최종.mp4" controls width="100%"></video>
+<video src="public/demo_vedio.mp4" controls width="100%"></video>
 
 ---
 
