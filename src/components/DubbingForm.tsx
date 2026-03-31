@@ -82,21 +82,27 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
-  const ctx = new AudioCtx();
 
-  // iOS Safari에서 사용자 제스처 이후에도 suspended 상태일 수 있음
-  if (ctx.state === "suspended") {
-    try { await ctx.resume(); } catch { /* ignore */ }
-  }
+  let ctx: AudioContext | null = null;
 
   try {
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    let decoded: AudioBuffer;
+    ctx = new AudioCtx();
 
+    // iOS Safari에서 사용자 제스처 이후에도 suspended 상태일 수 있음
+    if (ctx.state === "suspended") {
+      try { await ctx.resume(); } catch { /* ignore */ }
+    }
+
+    const arrayBuffer = await audioBlob.arrayBuffer();
+
+    // iOS Safari는 decodeAudioData 실패 시 throw 대신 undefined를 반환하기도 함
+    let decoded: AudioBuffer | undefined;
     try {
       decoded = await ctx.decodeAudioData(arrayBuffer);
-    } catch {
-      await ctx.close();
+    } catch { /* ignore */ }
+
+    if (!decoded) {
+      try { await ctx.close(); } catch { /* ignore */ }
       return audioBlob;
     }
 
@@ -107,7 +113,7 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
 
     // 이미 정확히 60초면 그대로 반환
     if (Math.abs(decoded.duration - MAX_DURATION_SEC) < 0.01) {
-      await ctx.close();
+      try { await ctx.close(); } catch { /* ignore */ }
       return audioBlob;
     }
 
@@ -125,13 +131,14 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
       }
     }
 
-    await ctx.close();
+    try { await ctx.close(); } catch { /* ignore */ }
 
     const wavBuffer = encodeWav(normalizedBuffer);
     return new Blob([wavBuffer], { type: "audio/wav" });
-  } catch (err) {
-    try { await ctx.close(); } catch { /* ignore */ }
-    throw err;
+  } catch {
+    // 어떤 에러든 원본 blob으로 폴백 — 모바일에서도 반드시 재생 가능하도록
+    if (ctx) { try { await ctx.close(); } catch { /* ignore */ } }
+    return audioBlob;
   }
 }
 
@@ -249,7 +256,8 @@ export default function DubbingForm() {
 
       const rawAudioBlob = await res.blob();
 
-      // TTS 결과가 60초보다 짧으면 무음으로 패딩하여 정확히 60초로 맞춤
+      // TTS 결과를 정확히 60초로 정규화 (초과 시 크롭, 미만 시 무음 패딩)
+      // 실패 시 원본 blob으로 폴백 — 모바일 포함 어떤 환경에서도 재생 보장
       setStatus("done");
       const paddedAudioBlob = await normalizeToOneMinute(rawAudioBlob);
       const url = URL.createObjectURL(paddedAudioBlob);
