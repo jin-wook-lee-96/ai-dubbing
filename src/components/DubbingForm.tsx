@@ -71,6 +71,55 @@ function encodeWav(audioBuffer: AudioBuffer): ArrayBuffer {
   return buffer;
 }
 
+/**
+ * TTS 결과 오디오가 MAX_DURATION_SEC보다 짧으면 뒤쪽에 무음을 붙여
+ * 정확히 MAX_DURATION_SEC 길이의 WAV로 반환한다.
+ * pitch/tempo 를 건드리지 않으므로 음질 변화 없음.
+ */
+async function padToOneMinute(audioBlob: Blob): Promise<Blob> {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
+  const ctx = new AudioCtx();
+
+  try {
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    let decoded: AudioBuffer;
+
+    try {
+      decoded = await ctx.decodeAudioData(arrayBuffer);
+    } catch {
+      await ctx.close();
+      // 디코딩 실패 시 원본 그대로 반환
+      return audioBlob;
+    }
+
+    // 이미 60초 이상이면 그대로 반환
+    if (decoded.duration >= MAX_DURATION_SEC - 0.01) {
+      await ctx.close();
+      return audioBlob;
+    }
+
+    const sr = decoded.sampleRate;
+    const channels = decoded.numberOfChannels;
+    const totalFrames = Math.round(MAX_DURATION_SEC * sr);
+    const paddedBuffer = ctx.createBuffer(channels, totalFrames, sr);
+
+    // 원본 채널 데이터를 복사 (나머지는 자동으로 0(무음)으로 채워짐)
+    for (let c = 0; c < channels; c++) {
+      paddedBuffer.getChannelData(c).set(decoded.getChannelData(c));
+    }
+
+    await ctx.close();
+
+    const wavBuffer = encodeWav(paddedBuffer);
+    return new Blob([wavBuffer], { type: "audio/wav" });
+  } catch (err) {
+    try { await ctx.close(); } catch { /* ignore */ }
+    throw err;
+  }
+}
+
 async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: boolean }> {
   const AudioCtx =
     window.AudioContext ||
@@ -183,9 +232,12 @@ export default function DubbingForm() {
         throw new Error(data.error || "더빙에 실패했습니다");
       }
 
+      const rawAudioBlob = await res.blob();
+
+      // TTS 결과가 60초보다 짧으면 무음으로 패딩하여 정확히 60초로 맞춤
       setStatus("done");
-      const audioBlob = await res.blob();
-      const url = URL.createObjectURL(audioBlob);
+      const paddedAudioBlob = await padToOneMinute(rawAudioBlob);
+      const url = URL.createObjectURL(paddedAudioBlob);
       setAudioUrl(url);
 
       const transcriptHeader = res.headers.get("X-Transcript");
