@@ -401,19 +401,22 @@ export default function DubbingForm() {
         const translatedText = decodeURIComponent(translationHeader);
         setTranslation(translatedText);
 
-        // 번역 텍스트를 문장 단위로 분리하고 TTS 실제 duration 기준으로 균등 배분
+        // 번역 텍스트를 문장 단위로 분리하고 TTS 실제 duration을 글자수 비율로 배분
         const sentences = translatedText
           .split(/(?<=[.!?。？！])\s+|(?<=\n)/)
           .map((s) => s.trim())
           .filter((s) => s.length > 0);
 
-        const perSentence = ttsDuration / sentences.length;
+        const totalChars = sentences.reduce((sum, s) => sum + s.length, 0);
 
-        const cues: SubtitleCue[] = sentences.map((text, i) => ({
-          start: i * perSentence,
-          end: (i + 1) * perSentence,
-          text,
-        }));
+        const cues: SubtitleCue[] = [];
+        let elapsed = 0;
+        for (const text of sentences) {
+          const ratio = totalChars > 0 ? text.length / totalChars : 1 / sentences.length;
+          const duration = ttsDuration * ratio;
+          cues.push({ start: elapsed, end: elapsed + duration, text });
+          elapsed += duration;
+        }
         setSubtitleCues(cues);
 
         // WebVTT 생성 — 문장별 타임스탬프 포함
