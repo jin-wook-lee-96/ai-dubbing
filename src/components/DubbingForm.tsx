@@ -108,17 +108,9 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
     } catch { /* ignore */ }
 
     if (!decoded) {
-      // 디코딩 실패: 60초 무음 WAV를 생성하여 반환 (60초 보장)
-      // 44100Hz 모노 60초 무음 버퍼
-      const fallbackSr = 44100;
-      const fallbackChannels = 1;
-      const fallbackFrames = Math.round(MAX_DURATION_SEC * fallbackSr);
-      const silentBuffer = ctx.createBuffer(fallbackChannels, fallbackFrames, fallbackSr);
-      // createBuffer는 이미 0으로 초기화된 버퍼를 반환하므로 별도 처리 불필요
-
+      // 디코딩 실패: 원본 blob 반환 — 무음 60초보다 원본 재생이 훨씬 낫다
       try { await ctx.close(); } catch { /* ignore */ }
-      const wavBuffer = encodeWav(silentBuffer);
-      return new Blob([wavBuffer], { type: "audio/wav" });
+      return audioBlob;
     }
 
     const sr = decoded.sampleRate;
@@ -151,46 +143,34 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
     const wavBuffer = encodeWav(normalizedBuffer);
     return new Blob([wavBuffer], { type: "audio/wav" });
   } catch {
-    // 최후 폴백: 60초 무음 WAV 반환 — 원본 blob을 그대로 반환하면 60초 미보장
+    // 최후 폴백: 원본 blob 반환 — 무음 WAV 생성 시도 없이 바로 반환
     if (ctx) { try { await ctx.close(); } catch { /* ignore */ } }
-
-    try {
-      const fallbackCtx = new AudioCtx();
-      const fallbackSr = 44100;
-      const fallbackChannels = 1;
-      const fallbackFrames = Math.round(MAX_DURATION_SEC * fallbackSr);
-      const silentBuffer = fallbackCtx.createBuffer(fallbackChannels, fallbackFrames, fallbackSr);
-      await fallbackCtx.close();
-      const wavBuffer = encodeWav(silentBuffer);
-      return new Blob([wavBuffer], { type: "audio/wav" });
-    } catch {
-      // AudioContext 자체가 불가한 극단적 환경에서만 도달: 원본 반환
-      return audioBlob;
-    }
+    return audioBlob;
   }
 }
 
 /**
  * TTS rawAudioBlob의 실제 재생 길이를 반환한다.
+ * HTMLAudioElement의 onloadedmetadata를 사용해 iOS Safari에서도 안정적으로 동작.
  * 디코딩 실패 시 MAX_DURATION_SEC(60)를 기본값으로 반환.
  */
 async function getTtsDuration(audioBlob: Blob): Promise<number> {
-  const AudioCtx =
-    window.AudioContext ||
-    (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
-  let ctx: AudioContext | null = null;
   try {
-    ctx = new AudioCtx();
-    if (ctx.state === "suspended") {
-      try { await ctx.resume(); } catch { /* ignore */ }
-    }
-    const arrayBuffer = await audioBlob.arrayBuffer();
-    const decoded = await ctx.decodeAudioData(arrayBuffer);
-    const duration = decoded.duration;
-    await ctx.close();
-    return duration;
+    return await new Promise((resolve) => {
+      const url = URL.createObjectURL(audioBlob);
+      const audio = new Audio();
+      audio.onloadedmetadata = () => {
+        const d = audio.duration;
+        URL.revokeObjectURL(url);
+        resolve(isFinite(d) && d > 0 ? d : MAX_DURATION_SEC);
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(MAX_DURATION_SEC);
+      };
+      audio.src = url;
+    });
   } catch {
-    if (ctx) { try { await ctx.close(); } catch { /* ignore */ } }
     return MAX_DURATION_SEC;
   }
 }
@@ -201,6 +181,11 @@ async function mergeVideoAudio(
   startSec: number,
   onProgress: (pct: number) => void
 ): Promise<Blob> {
+  // SharedArrayBuffer가 없으면 ffmpeg.wasm이 동작하지 않음 (COOP/COEP 헤더 필요)
+  if (typeof SharedArrayBuffer === "undefined") {
+    throw new Error("영상 합성은 이 브라우저에서 지원되지 않습니다 (SharedArrayBuffer 미지원)");
+  }
+
   const { FFmpeg } = await import("@ffmpeg/ffmpeg");
   const { toBlobURL, fetchFile } = await import("@ffmpeg/util");
 
@@ -210,10 +195,17 @@ async function mergeVideoAudio(
   });
 
   const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
-  await ffmpeg.load({
-    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
-    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
-  });
+  console.log("[ffmpeg] loading...");
+  try {
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+    });
+  } catch (e) {
+    console.error("[ffmpeg] load failed:", e);
+    throw e;
+  }
+  console.log("[ffmpeg] loaded");
 
   await ffmpeg.writeFile("input_video", await fetchFile(videoFile));
   await ffmpeg.writeFile("dubbed_audio.wav", await fetchFile(audioBlob));
@@ -395,13 +387,14 @@ export default function DubbingForm() {
       const rawAudioBlob = await res.blob();
 
       // 원본 MP3로 즉시 오디오 플레이어 표시 — 모바일 포함 모든 환경에서 재생 보장
+      // 오디오 URL은 raw MP3로 고정하고 절대 교체하지 않음
       setStatus("done");
       const rawUrl = URL.createObjectURL(rawAudioBlob);
       setAudioUrl(rawUrl);
 
       if (transcriptHeader) setTranscript(decodeURIComponent(transcriptHeader));
 
-      // TTS 원본 실제 duration 파악 — 자막 싱크 기준으로 사용
+      // TTS 원본 실제 duration 파악 — HTMLAudioElement로 iOS Safari에서도 안정적
       const ttsDuration = await getTtsDuration(rawAudioBlob);
 
       if (translationHeader) {
@@ -442,19 +435,15 @@ export default function DubbingForm() {
         setSubtitleUrl(URL.createObjectURL(vttBlob));
       }
 
-      // 정확히 60초 WAV로 정규화 (비디오 머지 및 오디오 다운로드 모두에 사용)
-      const normalizedBlob = await normalizeToOneMinute(rawAudioBlob);
-      if (normalizedBlob !== rawAudioBlob) {
-        URL.revokeObjectURL(rawUrl);
-        setAudioUrl(URL.createObjectURL(normalizedBlob));
-      }
-
-      // 비디오 입력이면 ffmpeg.wasm으로 오디오 트랙 교체 (이미 60초로 정규화된 오디오 사용)
-      if (isVideoInput) {
+      // 비디오 입력이면 ffmpeg.wasm으로 오디오 트랙 교체
+      // normalizeToOneMinute는 비디오 머지 전용 — 오디오 URL에는 적용하지 않음
+      const isVideo = file.type.startsWith("video/") || isVideoInput;
+      if (isVideo) {
         try {
           setStatus("merging");
           setMergeProgress(0);
-          const audioForMerge = normalizedBlob !== rawAudioBlob ? normalizedBlob : rawAudioBlob;
+          // 비디오 머지를 위해서만 60초 정규화 (오디오 URL과 완전히 별개)
+          const audioForMerge = await normalizeToOneMinute(rawAudioBlob);
           const videoBlob = await mergeVideoAudio(
             file,
             audioForMerge,
@@ -877,9 +866,10 @@ export default function DubbingForm() {
             ) : (
               <div className="space-y-2">
                 <audio
+                  key={audioUrl ?? "no-audio"}
                   ref={audioRef}
                   controls
-                  src={audioUrl!}
+                  src={audioUrl ?? undefined}
                   className="w-full h-10 [&::-webkit-media-controls-panel]:bg-white/5 rounded-lg"
                   onTimeUpdate={() => {
                     const t = audioRef.current?.currentTime ?? 0;
@@ -943,7 +933,7 @@ export default function DubbingForm() {
               {audioUrl && (
                 <a
                   href={audioUrl}
-                  download={`dubbed_${targetLang}.wav`}
+                  download={`dubbed_${targetLang}.mp3`}
                   className="flex items-center justify-center gap-2 w-full bg-white/5 hover:bg-white/8 border border-white/8 hover:border-white/15 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/50 hover:text-white/70"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -957,7 +947,7 @@ export default function DubbingForm() {
               {!videoOutputUrl && !audioUrl && (
                 <a
                   href={audioUrl!}
-                  download={`dubbed_${targetLang}.wav`}
+                  download={`dubbed_${targetLang}.mp3`}
                   className="flex items-center justify-center gap-2 w-full bg-white/8 hover:bg-white/12 border border-white/10 hover:border-white/20 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/70 hover:text-white"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
