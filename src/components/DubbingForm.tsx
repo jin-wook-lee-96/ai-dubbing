@@ -212,11 +212,18 @@ async function cropToOneMinute(file: File, startSec: number = 0): Promise<{ file
     const sr = decoded.sampleRate;
     const channels = decoded.numberOfChannels;
     const startFrame = Math.floor(startSec * sr);
-    const frames = Math.min(Math.floor(MAX_DURATION_SEC * sr), decoded.length - startFrame);
-    const cropped = ctx.createBuffer(channels, frames, sr);
+    const targetFrames = Math.round(MAX_DURATION_SEC * sr);
+    // 실제 복사할 프레임 수: 파일이 짧으면 파일 끝까지만 복사하고 나머지는 무음 패딩
+    const availableFrames = Math.max(0, decoded.length - startFrame);
+    const copyFrames = Math.min(targetFrames, availableFrames);
+    // 항상 정확히 60초(targetFrames)짜리 버퍼 생성 — 나머지는 자동으로 0(무음)
+    const cropped = ctx.createBuffer(channels, targetFrames, sr);
 
     for (let c = 0; c < channels; c++) {
-      cropped.getChannelData(c).set(decoded.getChannelData(c).subarray(startFrame, startFrame + frames));
+      if (copyFrames > 0) {
+        cropped.getChannelData(c).set(decoded.getChannelData(c).subarray(startFrame, startFrame + copyFrames));
+      }
+      // copyFrames ~ targetFrames 구간은 createBuffer가 이미 0으로 초기화하므로 별도 처리 불필요
     }
 
     await ctx.close();
@@ -225,7 +232,7 @@ async function cropToOneMinute(file: File, startSec: number = 0): Promise<{ file
     const baseName = file.name.replace(/\.[^.]+$/, "");
     const croppedFile = new File([wavBuffer], `${baseName}_cropped.wav`, { type: "audio/wav" });
 
-    return { file: croppedFile, wasCropped: startSec > 0 || decoded.duration > MAX_DURATION_SEC };
+    return { file: croppedFile, wasCropped: startSec > 0 || decoded.duration > MAX_DURATION_SEC || availableFrames < targetFrames };
   } catch (err) {
     try { await ctx.close(); } catch { /* ignore */ }
     throw err;
@@ -246,6 +253,8 @@ export default function DubbingForm() {
   const [isVideoInput, setIsVideoInput] = useState(false);
   const [videoOutputUrl, setVideoOutputUrl] = useState<string | null>(null);
   const [mergeProgress, setMergeProgress] = useState(0);
+  const [showSubtitles, setShowSubtitles] = useState(false);
+  const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const handleFileChange = (newFile: File | null) => {
@@ -279,6 +288,11 @@ export default function DubbingForm() {
     setTranscript("");
     setTranslation("");
     setWasCropped(false);
+    setShowSubtitles(false);
+    if (subtitleUrl) {
+      URL.revokeObjectURL(subtitleUrl);
+      setSubtitleUrl(null);
+    }
 
     let fileToUpload = file;
 
@@ -322,7 +336,16 @@ export default function DubbingForm() {
       setAudioUrl(rawUrl);
 
       if (transcriptHeader) setTranscript(decodeURIComponent(transcriptHeader));
-      if (translationHeader) setTranslation(decodeURIComponent(translationHeader));
+
+      if (translationHeader) {
+        const translatedText = decodeURIComponent(translationHeader);
+        setTranslation(translatedText);
+
+        // 번역 텍스트를 WebVTT 포맷으로 변환하여 Blob URL 생성 (iOS Safari CORS 회피)
+        const vttContent = `WEBVTT\n\n00:00:00.000 --> 00:01:00.000\n${translatedText}`;
+        const vttBlob = new Blob([vttContent], { type: "text/vtt" });
+        setSubtitleUrl(URL.createObjectURL(vttBlob));
+      }
 
       // 비디오 입력이면 ffmpeg.wasm으로 오디오 트랙 교체
       if (isVideoInput) {
@@ -666,11 +689,44 @@ export default function DubbingForm() {
             </div>
 
             {videoOutputUrl ? (
-              <video
-                controls
-                src={videoOutputUrl}
-                className="w-full rounded-xl max-h-64 bg-black"
-              />
+              <div className="space-y-2">
+                <video
+                  controls
+                  src={videoOutputUrl}
+                  className="w-full rounded-xl max-h-64 bg-black"
+                >
+                  {showSubtitles && subtitleUrl && (
+                    <track kind="subtitles" src={subtitleUrl} default />
+                  )}
+                </video>
+
+                {/* 자막 토글 — 동영상 출력 + 번역 텍스트 있을 때만 표시 */}
+                {subtitleUrl && (
+                  <label className="flex items-center gap-2.5 cursor-pointer select-none w-fit">
+                    <div
+                      role="switch"
+                      aria-checked={showSubtitles}
+                      onClick={() => setShowSubtitles((v) => !v)}
+                      className={`
+                        relative w-9 h-5 rounded-full transition-colors duration-200 flex-shrink-0
+                        ${showSubtitles
+                          ? "bg-gradient-to-r from-blue-500 to-violet-500"
+                          : "bg-white/15"
+                        }
+                      `}
+                    >
+                      <span
+                        className={`
+                          absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm
+                          transition-transform duration-200
+                          ${showSubtitles ? "translate-x-4" : "translate-x-0"}
+                        `}
+                      />
+                    </div>
+                    <span className="text-xs text-white/50">자막 표시</span>
+                  </label>
+                )}
+              </div>
             ) : (
               <audio
                 ref={audioRef}
