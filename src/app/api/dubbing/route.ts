@@ -63,6 +63,18 @@ export async function POST(req: NextRequest) {
     });
 
     if (!sttRes.ok) {
+      if (sttRes.status === 429) {
+        return NextResponse.json(
+          { error: "ElevenLabs API 사용량 한도를 초과했습니다. 잠시 후 다시 시도하거나 API 키를 확인해주세요." },
+          { status: 429 }
+        );
+      }
+      if (sttRes.status === 401) {
+        return NextResponse.json(
+          { error: "ElevenLabs API 키가 유효하지 않습니다. API 키를 확인해주세요." },
+          { status: 401 }
+        );
+      }
       const err = await sttRes.text();
       throw new Error(`STT failed: ${err}`);
     }
@@ -99,6 +111,18 @@ export async function POST(req: NextRequest) {
     });
 
     if (!ttsRes.ok) {
+      if (ttsRes.status === 429) {
+        return NextResponse.json(
+          { error: "ElevenLabs API 사용량 한도를 초과했습니다. 잠시 후 다시 시도하거나 API 키를 확인해주세요." },
+          { status: 429 }
+        );
+      }
+      if (ttsRes.status === 401) {
+        return NextResponse.json(
+          { error: "ElevenLabs API 키가 유효하지 않습니다. API 키를 확인해주세요." },
+          { status: 401 }
+        );
+      }
       const err = await ttsRes.text();
       throw new Error(`TTS failed: ${err}`);
     }
@@ -116,6 +140,23 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("Dubbing error:", error);
+
+    // OpenAI API 에러 처리
+    if (error instanceof OpenAI.APIError) {
+      if (error.status === 429) {
+        return NextResponse.json(
+          { error: "OpenAI API 사용량 한도를 초과했습니다. 잠시 후 다시 시도하거나 API 키를 확인해주세요." },
+          { status: 429 }
+        );
+      }
+      if (error.status === 401) {
+        return NextResponse.json(
+          { error: "OpenAI API 키가 유효하지 않습니다. API 키를 확인해주세요." },
+          { status: 401 }
+        );
+      }
+    }
+
     return NextResponse.json(
       { error: "더빙 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요." },
       { status: 500 }

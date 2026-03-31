@@ -15,6 +15,8 @@ const LANGUAGES = [
 
 type Status = "idle" | "cropping" | "uploading" | "transcribing" | "translating" | "synthesizing" | "merging" | "done" | "error";
 
+type SubtitleCue = { start: number; end: number; text: string };
+
 const STATUS_MESSAGES: Record<Status, string> = {
   idle: "",
   cropping: "1분으로 자동 크롭 중...",
@@ -175,12 +177,12 @@ async function mergeVideoAudio(
     "-c:a", "aac",
     "-map", "0:v:0",
     "-map", "1:a:0",
-    "-shortest",
+    "-t", "60",
     "-y", "output.mp4",
   ]);
 
   const data = await ffmpeg.readFile("output.mp4");
-  await ffmpeg.terminate();
+  ffmpeg.terminate();
 
   const uint8 = data as Uint8Array;
   const buf = uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength) as ArrayBuffer;
@@ -249,13 +251,17 @@ export default function DubbingForm() {
   const [transcript, setTranscript] = useState("");
   const [translation, setTranslation] = useState("");
   const [error, setError] = useState("");
+  const [isQuotaError, setIsQuotaError] = useState(false);
   const [wasCropped, setWasCropped] = useState(false);
   const [isVideoInput, setIsVideoInput] = useState(false);
   const [videoOutputUrl, setVideoOutputUrl] = useState<string | null>(null);
   const [mergeProgress, setMergeProgress] = useState(0);
   const [showSubtitles, setShowSubtitles] = useState(false);
   const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
+  const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([]);
+  const [currentSubtitle, setCurrentSubtitle] = useState<string>("");
   const audioRef = useRef<HTMLAudioElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const handleFileChange = (newFile: File | null) => {
     setFile(newFile);
@@ -277,7 +283,7 @@ export default function DubbingForm() {
     audio.src = url;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.SyntheticEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!file) return;
 
@@ -285,10 +291,13 @@ export default function DubbingForm() {
     setVideoOutputUrl(null);
     setMergeProgress(0);
     setError("");
+    setIsQuotaError(false);
     setTranscript("");
     setTranslation("");
     setWasCropped(false);
     setShowSubtitles(false);
+    setSubtitleCues([]);
+    setCurrentSubtitle("");
     if (subtitleUrl) {
       URL.revokeObjectURL(subtitleUrl);
       setSubtitleUrl(null);
@@ -321,6 +330,9 @@ export default function DubbingForm() {
 
       if (!res.ok) {
         const data = await res.json();
+        if (res.status === 429) {
+          setIsQuotaError(true);
+        }
         throw new Error(data.error || "더빙에 실패했습니다");
       }
 
@@ -341,20 +353,57 @@ export default function DubbingForm() {
         const translatedText = decodeURIComponent(translationHeader);
         setTranslation(translatedText);
 
-        // 번역 텍스트를 WebVTT 포맷으로 변환하여 Blob URL 생성 (iOS Safari CORS 회피)
-        const vttContent = `WEBVTT\n\n00:00:00.000 --> 00:01:00.000\n${translatedText}`;
-        const vttBlob = new Blob([vttContent], { type: "text/vtt" });
+        // 번역 텍스트를 문장 단위로 분리하여 균등 시간 배분
+        const sentences = translatedText
+          .split(/(?<=[.!?。？！])\s+|(?<=\n)/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+
+        const totalDuration = 60;
+        const perSentence = totalDuration / sentences.length;
+
+        const cues: SubtitleCue[] = sentences.map((text, i) => ({
+          start: i * perSentence,
+          end: (i + 1) * perSentence,
+          text,
+        }));
+        setSubtitleCues(cues);
+
+        // WebVTT 생성 — 문장별 타임스탬프 포함
+        const toVttTime = (sec: number) => {
+          const h = Math.floor(sec / 3600).toString().padStart(2, "0");
+          const m = Math.floor((sec % 3600) / 60).toString().padStart(2, "0");
+          const s = Math.floor(sec % 60).toString().padStart(2, "0");
+          const ms = Math.round((sec % 1) * 1000).toString().padStart(3, "0");
+          return `${h}:${m}:${s}.${ms}`;
+        };
+
+        const vttLines = ["WEBVTT", ""];
+        cues.forEach((cue) => {
+          vttLines.push(`${toVttTime(cue.start)} --> ${toVttTime(cue.end)}`);
+          vttLines.push(cue.text);
+          vttLines.push("");
+        });
+        const vttBlob = new Blob([vttLines.join("\n")], { type: "text/vtt" });
         setSubtitleUrl(URL.createObjectURL(vttBlob));
       }
 
-      // 비디오 입력이면 ffmpeg.wasm으로 오디오 트랙 교체
+      // 정확히 60초 WAV로 정규화 (비디오 머지 및 오디오 다운로드 모두에 사용)
+      const normalizedBlob = await normalizeToOneMinute(rawAudioBlob);
+      if (normalizedBlob !== rawAudioBlob) {
+        URL.revokeObjectURL(rawUrl);
+        setAudioUrl(URL.createObjectURL(normalizedBlob));
+      }
+
+      // 비디오 입력이면 ffmpeg.wasm으로 오디오 트랙 교체 (이미 60초로 정규화된 오디오 사용)
       if (isVideoInput) {
         try {
           setStatus("merging");
           setMergeProgress(0);
+          const audioForMerge = normalizedBlob !== rawAudioBlob ? normalizedBlob : rawAudioBlob;
           const videoBlob = await mergeVideoAudio(
             file,
-            rawAudioBlob,
+            audioForMerge,
             cropStart,
             (pct) => setMergeProgress(pct)
           );
@@ -365,14 +414,6 @@ export default function DubbingForm() {
         }
         setStatus("done");
       }
-
-      // 백그라운드에서 WAV 정규화 시도 (성공하면 URL 교체, 실패해도 원본 재생 유지)
-      normalizeToOneMinute(rawAudioBlob).then((normalizedBlob) => {
-        if (normalizedBlob !== rawAudioBlob) {
-          URL.revokeObjectURL(rawUrl);
-          setAudioUrl(URL.createObjectURL(normalizedBlob));
-        }
-      });
     } catch (err) {
       setStatus("error");
       setError(err instanceof Error ? err.message : "알 수 없는 오류");
@@ -663,13 +704,25 @@ export default function DubbingForm() {
 
       {/* 에러 */}
       {status === "error" && (
-        <div className="flex items-start gap-3 bg-red-500/8 border border-red-400/20 rounded-xl p-4">
-          <div className="w-5 h-5 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-            <svg className="w-3 h-3 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+        <div className={`flex items-start gap-3 rounded-xl p-4 ${
+          isQuotaError
+            ? "bg-amber-500/8 border border-amber-400/20"
+            : "bg-red-500/8 border border-red-400/20"
+        }`}>
+          <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${
+            isQuotaError ? "bg-amber-500/20" : "bg-red-500/20"
+          }`}>
+            {isQuotaError ? (
+              <svg className="w-3 h-3 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              </svg>
+            ) : (
+              <svg className="w-3 h-3 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
           </div>
-          <p className="text-sm text-red-300/80">{error}</p>
+          <p className={`text-sm ${isQuotaError ? "text-amber-300/80" : "text-red-300/80"}`}>{error}</p>
         </div>
       )}
 
@@ -690,18 +743,47 @@ export default function DubbingForm() {
 
             {videoOutputUrl ? (
               <div className="space-y-2">
-                <video
-                  controls
-                  src={videoOutputUrl}
-                  className="w-full rounded-xl max-h-64 bg-black"
-                >
-                  {showSubtitles && subtitleUrl && (
-                    <track kind="subtitles" src={subtitleUrl} default />
+                {/* 비디오 + CSS overlay 자막 컨테이너 */}
+                <div className="relative">
+                  <video
+                    ref={videoRef}
+                    controls
+                    src={videoOutputUrl}
+                    className="w-full rounded-xl max-h-64 bg-black"
+                    onTimeUpdate={() => {
+                      const t = videoRef.current?.currentTime ?? 0;
+                      const cue = subtitleCues.find((c) => t >= c.start && t < c.end);
+                      setCurrentSubtitle(cue?.text ?? "");
+                    }}
+                  >
+                    {showSubtitles && subtitleUrl && (
+                      <track kind="subtitles" src={subtitleUrl} default />
+                    )}
+                  </video>
+
+                  {/* CSS overlay 자막 — iOS Safari fallback */}
+                  {showSubtitles && currentSubtitle && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        bottom: "10%",
+                        left: 0,
+                        right: 0,
+                        textAlign: "center",
+                        color: "white",
+                        textShadow: "1px 1px 3px black",
+                        fontSize: "clamp(12px, 2.5vw, 16px)",
+                        padding: "0 16px",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {currentSubtitle}
+                    </div>
                   )}
-                </video>
+                </div>
 
                 {/* 자막 토글 — 동영상 출력 + 번역 텍스트 있을 때만 표시 */}
-                {subtitleUrl && (
+                {subtitleCues.length > 0 && (
                   <label className="flex items-center gap-2.5 cursor-pointer select-none w-fit">
                     <div
                       role="switch"
@@ -736,16 +818,50 @@ export default function DubbingForm() {
               />
             )}
 
-            <a
-              href={videoOutputUrl ?? audioUrl!}
-              download={videoOutputUrl ? `dubbed_${targetLang}.mp4` : `dubbed_${targetLang}.wav`}
-              className="flex items-center justify-center gap-2 w-full bg-white/8 hover:bg-white/12 border border-white/10 hover:border-white/20 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/70 hover:text-white"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-              다운로드
-            </a>
+            {/* 다운로드 버튼 영역 */}
+            <div className="flex flex-col gap-2">
+              {/* 비디오 다운로드 (비디오 출력 시) */}
+              {videoOutputUrl && (
+                <a
+                  href={videoOutputUrl}
+                  download={`dubbed_${targetLang}.mp4`}
+                  className="flex items-center justify-center gap-2 w-full bg-white/8 hover:bg-white/12 border border-white/10 hover:border-white/20 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/70 hover:text-white"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  비디오 다운로드
+                </a>
+              )}
+
+              {/* 오디오 다운로드 — 항상 표시 */}
+              {audioUrl && (
+                <a
+                  href={audioUrl}
+                  download={`dubbed_${targetLang}.wav`}
+                  className="flex items-center justify-center gap-2 w-full bg-white/5 hover:bg-white/8 border border-white/8 hover:border-white/15 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/50 hover:text-white/70"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+                  </svg>
+                  오디오 다운로드
+                </a>
+              )}
+
+              {/* 오디오 전용 출력 시 단일 다운로드 버튼 */}
+              {!videoOutputUrl && !audioUrl && (
+                <a
+                  href={audioUrl!}
+                  download={`dubbed_${targetLang}.wav`}
+                  className="flex items-center justify-center gap-2 w-full bg-white/8 hover:bg-white/12 border border-white/10 hover:border-white/20 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/70 hover:text-white"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  다운로드
+                </a>
+              )}
+            </div>
           </div>
         </div>
       )}
