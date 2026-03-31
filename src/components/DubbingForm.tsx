@@ -142,7 +142,7 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
   }
 }
 
-async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: boolean }> {
+async function cropToOneMinute(file: File, startSec: number = 0): Promise<{ file: File; wasCropped: boolean }> {
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
@@ -159,18 +159,19 @@ async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: bo
       return { file, wasCropped: false };
     }
 
-    if (decoded.duration <= MAX_DURATION_SEC) {
+    if (decoded.duration <= MAX_DURATION_SEC && startSec === 0) {
       await ctx.close();
       return { file, wasCropped: false };
     }
 
     const sr = decoded.sampleRate;
     const channels = decoded.numberOfChannels;
-    const frames = Math.floor(MAX_DURATION_SEC * sr);
+    const startFrame = Math.floor(startSec * sr);
+    const frames = Math.min(Math.floor(MAX_DURATION_SEC * sr), decoded.length - startFrame);
     const cropped = ctx.createBuffer(channels, frames, sr);
 
     for (let c = 0; c < channels; c++) {
-      cropped.getChannelData(c).set(decoded.getChannelData(c).subarray(0, frames));
+      cropped.getChannelData(c).set(decoded.getChannelData(c).subarray(startFrame, startFrame + frames));
     }
 
     await ctx.close();
@@ -179,7 +180,7 @@ async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: bo
     const baseName = file.name.replace(/\.[^.]+$/, "");
     const croppedFile = new File([wavBuffer], `${baseName}_cropped.wav`, { type: "audio/wav" });
 
-    return { file: croppedFile, wasCropped: true };
+    return { file: croppedFile, wasCropped: startSec > 0 || decoded.duration > MAX_DURATION_SEC };
   } catch (err) {
     try { await ctx.close(); } catch { /* ignore */ }
     throw err;
@@ -189,6 +190,7 @@ async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: bo
 export default function DubbingForm() {
   const [file, setFile] = useState<File | null>(null);
   const [fileDuration, setFileDuration] = useState<number | null>(null);
+  const [cropStart, setCropStart] = useState<number>(0);
   const [targetLang, setTargetLang] = useState("en");
   const [status, setStatus] = useState<Status>("idle");
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -202,6 +204,7 @@ export default function DubbingForm() {
     setFile(newFile);
     setFileDuration(null);
     setWasCropped(false);
+    setCropStart(0);
     if (!newFile) return;
 
     const url = URL.createObjectURL(newFile);
@@ -228,9 +231,9 @@ export default function DubbingForm() {
 
     try {
       // Step 0: 필요 시 1분 크롭 (클라이언트)
-      if (fileDuration === null || fileDuration > MAX_DURATION_SEC) {
+      if (fileDuration === null || fileDuration > MAX_DURATION_SEC || cropStart > 0) {
         setStatus("cropping");
-        const result = await cropToOneMinute(file);
+        const result = await cropToOneMinute(file, cropStart);
         fileToUpload = result.file;
         if (result.wasCropped) setWasCropped(true);
       }
@@ -290,6 +293,13 @@ export default function DubbingForm() {
     return m > 0 ? `${m}분 ${s}초` : `${s}초`;
   };
 
+  // 슬라이더 타임라인용 M:SS 형식
+  const formatMMSS = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
+
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
 
@@ -334,7 +344,9 @@ export default function DubbingForm() {
                 </p>
                 {fileDuration !== null && fileDuration > MAX_DURATION_SEC && (
                   <span className="inline-block mt-2 text-xs text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded-full px-3 py-1">
-                    앞 1분 자동 크롭
+                    {cropStart === 0
+                      ? "앞 1분 자동 크롭"
+                      : `${formatMMSS(cropStart)}~${formatMMSS(cropStart + MAX_DURATION_SEC)} 크롭`}
                   </span>
                 )}
                 <span className="inline-block mt-3 text-xs text-white/40 bg-white/5 border border-white/10 rounded-full px-3 py-1">
@@ -361,6 +373,60 @@ export default function DubbingForm() {
             )}
           </div>
         </label>
+
+        {/* 크롭 범위 슬라이더 — 파일이 1분 초과일 때만 표시 */}
+        {fileDuration !== null && fileDuration > MAX_DURATION_SEC && (
+          <div
+            className="mt-4 bg-white/5 border border-white/10 rounded-xl p-4 space-y-3"
+            onClick={(e) => e.preventDefault()}
+          >
+            {/* 헤더 */}
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-white/50 uppercase tracking-wider">크롭 구간</span>
+              <span className="text-xs font-semibold text-blue-300 tabular-nums">
+                {formatMMSS(cropStart)} → {formatMMSS(Math.min(cropStart + MAX_DURATION_SEC, fileDuration))}
+              </span>
+            </div>
+
+            {/* 타임라인 바 */}
+            <div className="relative h-2 bg-white/10 rounded-full overflow-hidden">
+              <div
+                className="absolute h-full bg-gradient-to-r from-blue-500 to-violet-500 rounded-full"
+                style={{
+                  left: `${(cropStart / fileDuration) * 100}%`,
+                  width: `${(Math.min(MAX_DURATION_SEC, fileDuration - cropStart) / fileDuration) * 100}%`,
+                }}
+              />
+            </div>
+
+            {/* 슬라이더 */}
+            <input
+              type="range"
+              min={0}
+              max={Math.max(0, fileDuration - MAX_DURATION_SEC)}
+              step={1}
+              value={cropStart}
+              onChange={(e) => setCropStart(Number(e.target.value))}
+              className="w-full h-1.5 appearance-none bg-transparent cursor-pointer
+                [&::-webkit-slider-thumb]:appearance-none
+                [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
+                [&::-webkit-slider-thumb]:rounded-full
+                [&::-webkit-slider-thumb]:bg-white
+                [&::-webkit-slider-thumb]:shadow-md
+                [&::-webkit-slider-thumb]:cursor-pointer
+                [&::-webkit-slider-thumb]:-mt-1
+                [&::-moz-range-thumb]:w-4 [&::-moz-range-thumb]:h-4
+                [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-white
+                [&::-moz-range-thumb]:border-0 [&::-moz-range-thumb]:cursor-pointer"
+            />
+
+            {/* 시간 레이블 */}
+            <div className="flex justify-between text-xs text-white/25 tabular-nums">
+              <span>0:00</span>
+              <span>{formatMMSS(fileDuration)}</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 언어 선택 */}
@@ -456,7 +522,9 @@ export default function DubbingForm() {
               <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              앞 1분이 자동 크롭되어 처리되었습니다
+              {cropStart === 0
+                ? "앞 1분이 자동 크롭되어 처리되었습니다"
+                : `${formatMMSS(cropStart)}~${formatMMSS(cropStart + MAX_DURATION_SEC)} 구간이 크롭되어 처리되었습니다`}
             </div>
           )}
 
