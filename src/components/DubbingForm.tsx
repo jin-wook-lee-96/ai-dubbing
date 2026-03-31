@@ -30,6 +30,47 @@ const STEPS: Status[] = ["uploading", "transcribing", "translating", "synthesizi
 
 const MAX_DURATION_SEC = 60;
 
+function encodeWav(audioBuffer: AudioBuffer): ArrayBuffer {
+  const channels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const frames = audioBuffer.length;
+  const bytesPerSample = 2; // 16-bit
+  const dataSize = frames * channels * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, channels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * channels * bytesPerSample, true);
+  view.setUint16(32, channels * bytesPerSample, true);
+  view.setUint16(34, 16, true); // bits per sample
+
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  // Interleave channels and convert float32 → int16
+  let offset = 44;
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < channels; c++) {
+      const sample = Math.max(-1, Math.min(1, audioBuffer.getChannelData(c)[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += 2;
+    }
+  }
+
+  return buffer;
+}
+
 async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: boolean }> {
   const AudioCtx =
     window.AudioContext ||
@@ -43,7 +84,6 @@ async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: bo
     try {
       decoded = await ctx.decodeAudioData(arrayBuffer);
     } catch {
-      // 디코딩 불가 포맷(일부 비디오 컨테이너 등) — 원본 그대로 반환
       await ctx.close();
       return { file, wasCropped: false };
     }
@@ -53,7 +93,6 @@ async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: bo
       return { file, wasCropped: false };
     }
 
-    // 60초로 크롭
     const sr = decoded.sampleRate;
     const channels = decoded.numberOfChannels;
     const frames = Math.floor(MAX_DURATION_SEC * sr);
@@ -63,42 +102,11 @@ async function cropToOneMinute(file: File): Promise<{ file: File; wasCropped: bo
       cropped.getChannelData(c).set(decoded.getChannelData(c).subarray(0, frames));
     }
 
-    if (typeof MediaRecorder === "undefined") {
-      await ctx.close();
-      throw new Error(
-        "이 브라우저에서는 자동 크롭을 지원하지 않습니다. 1분 미만 파일을 업로드해주세요."
-      );
-    }
-
-    const mimeType =
-      ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/ogg", "audio/mp4"].find(
-        (t) => MediaRecorder.isTypeSupported(t)
-      ) ?? "";
-
-    const dest = ctx.createMediaStreamDestination();
-    const src = ctx.createBufferSource();
-    src.buffer = cropped;
-    src.connect(dest);
-
-    const recorder = new MediaRecorder(dest.stream, mimeType ? { mimeType } : {});
-    const chunks: Blob[] = [];
-
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunks.push(e.data);
-      };
-      recorder.onstop = () => resolve(new Blob(chunks, { type: recorder.mimeType }));
-      recorder.onerror = () => reject(new Error("크롭 인코딩 실패"));
-      recorder.start();
-      src.start(0);
-      src.onended = () => recorder.stop();
-    });
-
     await ctx.close();
 
-    const ext = recorder.mimeType.split("/")[1]?.split(";")[0] ?? "webm";
+    const wavBuffer = encodeWav(cropped);
     const baseName = file.name.replace(/\.[^.]+$/, "");
-    const croppedFile = new File([blob], `${baseName}_cropped.${ext}`, { type: blob.type });
+    const croppedFile = new File([wavBuffer], `${baseName}_cropped.wav`, { type: "audio/wav" });
 
     return { file: croppedFile, wasCropped: true };
   } catch (err) {
