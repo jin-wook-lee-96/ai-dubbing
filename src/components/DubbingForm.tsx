@@ -254,19 +254,27 @@ export default function DubbingForm() {
         throw new Error(data.error || "더빙에 실패했습니다");
       }
 
-      const rawAudioBlob = await res.blob();
-
-      // TTS 결과를 정확히 60초로 정규화 (초과 시 크롭, 미만 시 무음 패딩)
-      // 실패 시 원본 blob으로 폴백 — 모바일 포함 어떤 환경에서도 재생 보장
-      setStatus("done");
-      const paddedAudioBlob = await normalizeToOneMinute(rawAudioBlob);
-      const url = URL.createObjectURL(paddedAudioBlob);
-      setAudioUrl(url);
-
+      // 헤더는 body 소비 전에 읽어둠
       const transcriptHeader = res.headers.get("X-Transcript");
       const translationHeader = res.headers.get("X-Translation");
+
+      const rawAudioBlob = await res.blob();
+
+      // 원본 MP3로 즉시 오디오 플레이어 표시 — 모바일 포함 모든 환경에서 재생 보장
+      setStatus("done");
+      const rawUrl = URL.createObjectURL(rawAudioBlob);
+      setAudioUrl(rawUrl);
+
       if (transcriptHeader) setTranscript(decodeURIComponent(transcriptHeader));
       if (translationHeader) setTranslation(decodeURIComponent(translationHeader));
+
+      // 백그라운드에서 WAV 정규화 시도 (성공하면 URL 교체, 실패해도 원본 재생 유지)
+      normalizeToOneMinute(rawAudioBlob).then((normalizedBlob) => {
+        if (normalizedBlob !== rawAudioBlob) {
+          URL.revokeObjectURL(rawUrl);
+          setAudioUrl(URL.createObjectURL(normalizedBlob));
+        }
+      });
     } catch (err) {
       setStatus("error");
       setError(err instanceof Error ? err.message : "알 수 없는 오류");
