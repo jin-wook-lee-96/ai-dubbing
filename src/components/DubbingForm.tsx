@@ -72,15 +72,22 @@ function encodeWav(audioBuffer: AudioBuffer): ArrayBuffer {
 }
 
 /**
- * TTS 결과 오디오가 MAX_DURATION_SEC보다 짧으면 뒤쪽에 무음을 붙여
- * 정확히 MAX_DURATION_SEC 길이의 WAV로 반환한다.
- * pitch/tempo 를 건드리지 않으므로 음질 변화 없음.
+ * TTS 결과 오디오를 정확히 MAX_DURATION_SEC(60초)로 정규화한다.
+ * - 60초 초과 시: 앞 60초만 크롭
+ * - 60초 미만 시: 뒤쪽에 무음 패딩
+ * pitch/tempo를 건드리지 않으므로 음질 변화 없음.
+ * iOS Safari를 포함한 모바일 환경 호환.
  */
-async function padToOneMinute(audioBlob: Blob): Promise<Blob> {
+async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
   const ctx = new AudioCtx();
+
+  // iOS Safari에서 사용자 제스처 이후에도 suspended 상태일 수 있음
+  if (ctx.state === "suspended") {
+    try { await ctx.resume(); } catch { /* ignore */ }
+  }
 
   try {
     const arrayBuffer = await audioBlob.arrayBuffer();
@@ -90,29 +97,37 @@ async function padToOneMinute(audioBlob: Blob): Promise<Blob> {
       decoded = await ctx.decodeAudioData(arrayBuffer);
     } catch {
       await ctx.close();
-      // 디코딩 실패 시 원본 그대로 반환
-      return audioBlob;
-    }
-
-    // 이미 60초 이상이면 그대로 반환
-    if (decoded.duration >= MAX_DURATION_SEC - 0.01) {
-      await ctx.close();
       return audioBlob;
     }
 
     const sr = decoded.sampleRate;
     const channels = decoded.numberOfChannels;
-    const totalFrames = Math.round(MAX_DURATION_SEC * sr);
-    const paddedBuffer = ctx.createBuffer(channels, totalFrames, sr);
+    const targetFrames = Math.round(MAX_DURATION_SEC * sr);
+    const sourceFrames = decoded.length;
 
-    // 원본 채널 데이터를 복사 (나머지는 자동으로 0(무음)으로 채워짐)
+    // 이미 정확히 60초면 그대로 반환
+    if (Math.abs(decoded.duration - MAX_DURATION_SEC) < 0.01) {
+      await ctx.close();
+      return audioBlob;
+    }
+
+    const normalizedBuffer = ctx.createBuffer(channels, targetFrames, sr);
+
     for (let c = 0; c < channels; c++) {
-      paddedBuffer.getChannelData(c).set(decoded.getChannelData(c));
+      const srcData = decoded.getChannelData(c);
+      const dstData = normalizedBuffer.getChannelData(c);
+      if (sourceFrames >= targetFrames) {
+        // 60초 초과: 앞 60초만 크롭
+        dstData.set(srcData.subarray(0, targetFrames));
+      } else {
+        // 60초 미만: 복사 후 나머지는 자동으로 0(무음)
+        dstData.set(srcData);
+      }
     }
 
     await ctx.close();
 
-    const wavBuffer = encodeWav(paddedBuffer);
+    const wavBuffer = encodeWav(normalizedBuffer);
     return new Blob([wavBuffer], { type: "audio/wav" });
   } catch (err) {
     try { await ctx.close(); } catch { /* ignore */ }
@@ -236,7 +251,7 @@ export default function DubbingForm() {
 
       // TTS 결과가 60초보다 짧으면 무음으로 패딩하여 정확히 60초로 맞춤
       setStatus("done");
-      const paddedAudioBlob = await padToOneMinute(rawAudioBlob);
+      const paddedAudioBlob = await normalizeToOneMinute(rawAudioBlob);
       const url = URL.createObjectURL(paddedAudioBlob);
       setAudioUrl(url);
 
