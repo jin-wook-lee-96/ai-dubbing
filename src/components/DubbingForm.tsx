@@ -13,7 +13,7 @@ const LANGUAGES = [
   { code: "de", label: "Deutsch" },
 ];
 
-type Status = "idle" | "cropping" | "uploading" | "transcribing" | "translating" | "synthesizing" | "done" | "error";
+type Status = "idle" | "cropping" | "uploading" | "transcribing" | "translating" | "synthesizing" | "merging" | "done" | "error";
 
 const STATUS_MESSAGES: Record<Status, string> = {
   idle: "",
@@ -22,6 +22,7 @@ const STATUS_MESSAGES: Record<Status, string> = {
   transcribing: "음성을 텍스트로 변환 중...",
   translating: "번역 중...",
   synthesizing: "음성 합성 중...",
+  merging: "비디오 합성 중...",
   done: "더빙 완료!",
   error: "오류가 발생했습니다",
 };
@@ -142,6 +143,50 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
   }
 }
 
+async function mergeVideoAudio(
+  videoFile: File,
+  audioBlob: Blob,
+  startSec: number,
+  onProgress: (pct: number) => void
+): Promise<Blob> {
+  const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+  const { toBlobURL, fetchFile } = await import("@ffmpeg/util");
+
+  const ffmpeg = new FFmpeg();
+  ffmpeg.on("progress", ({ progress }) => {
+    onProgress(Math.round(Math.min(progress, 1) * 100));
+  });
+
+  const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
+  await ffmpeg.load({
+    coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
+    wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
+  });
+
+  await ffmpeg.writeFile("input_video", await fetchFile(videoFile));
+  await ffmpeg.writeFile("dubbed_audio.wav", await fetchFile(audioBlob));
+
+  await ffmpeg.exec([
+    "-ss", String(startSec),
+    "-t", "60",
+    "-i", "input_video",
+    "-i", "dubbed_audio.wav",
+    "-c:v", "copy",
+    "-c:a", "aac",
+    "-map", "0:v:0",
+    "-map", "1:a:0",
+    "-shortest",
+    "-y", "output.mp4",
+  ]);
+
+  const data = await ffmpeg.readFile("output.mp4");
+  await ffmpeg.terminate();
+
+  const uint8 = data as Uint8Array;
+  const buf = uint8.buffer.slice(uint8.byteOffset, uint8.byteOffset + uint8.byteLength) as ArrayBuffer;
+  return new Blob([buf], { type: "video/mp4" });
+}
+
 async function cropToOneMinute(file: File, startSec: number = 0): Promise<{ file: File; wasCropped: boolean }> {
   const AudioCtx =
     window.AudioContext ||
@@ -198,6 +243,9 @@ export default function DubbingForm() {
   const [translation, setTranslation] = useState("");
   const [error, setError] = useState("");
   const [wasCropped, setWasCropped] = useState(false);
+  const [isVideoInput, setIsVideoInput] = useState(false);
+  const [videoOutputUrl, setVideoOutputUrl] = useState<string | null>(null);
+  const [mergeProgress, setMergeProgress] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const handleFileChange = (newFile: File | null) => {
@@ -205,6 +253,9 @@ export default function DubbingForm() {
     setFileDuration(null);
     setWasCropped(false);
     setCropStart(0);
+    setIsVideoInput(newFile?.type.startsWith("video/") ?? false);
+    setVideoOutputUrl(null);
+    setMergeProgress(0);
     if (!newFile) return;
 
     const url = URL.createObjectURL(newFile);
@@ -222,6 +273,8 @@ export default function DubbingForm() {
     if (!file) return;
 
     setAudioUrl(null);
+    setVideoOutputUrl(null);
+    setMergeProgress(0);
     setError("");
     setTranscript("");
     setTranslation("");
@@ -270,6 +323,25 @@ export default function DubbingForm() {
 
       if (transcriptHeader) setTranscript(decodeURIComponent(transcriptHeader));
       if (translationHeader) setTranslation(decodeURIComponent(translationHeader));
+
+      // 비디오 입력이면 ffmpeg.wasm으로 오디오 트랙 교체
+      if (isVideoInput) {
+        try {
+          setStatus("merging");
+          setMergeProgress(0);
+          const videoBlob = await mergeVideoAudio(
+            file,
+            rawAudioBlob,
+            cropStart,
+            (pct) => setMergeProgress(pct)
+          );
+          const vUrl = URL.createObjectURL(videoBlob);
+          setVideoOutputUrl(vUrl);
+        } catch (err) {
+          console.error("Video merge failed, keeping audio fallback:", err);
+        }
+        setStatus("done");
+      }
 
       // 백그라운드에서 WAV 정규화 시도 (성공하면 URL 교체, 실패해도 원본 재생 유지)
       normalizeToOneMinute(rawAudioBlob).then((normalizedBlob) => {
@@ -528,6 +600,22 @@ export default function DubbingForm() {
             </div>
           )}
 
+          {/* 비디오 합성 진행률 */}
+          {status === "merging" && (
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs text-white/40">
+                <span>비디오 합성 중</span>
+                <span>{mergeProgress}%</span>
+              </div>
+              <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-emerald-500 to-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: `${mergeProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           {/* 원본 텍스트 */}
           {transcript && (
             <div className="space-y-1.5">
@@ -562,26 +650,39 @@ export default function DubbingForm() {
         </div>
       )}
 
-      {/* 결과 오디오 플레이어 */}
-      {audioUrl && (
+      {/* 결과 플레이어 (오디오 또는 비디오) */}
+      {(audioUrl || videoOutputUrl) && (
         <div className="relative">
           <div className="absolute -inset-px rounded-2xl bg-gradient-to-br from-blue-500/15 to-violet-500/15" />
           <div className="relative bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4 backdrop-blur-sm">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-gradient-to-r from-blue-400 to-violet-400 animate-pulse" />
               <h3 className="text-sm font-semibold text-white/80">더빙 결과</h3>
+              {videoOutputUrl && (
+                <span className="ml-auto text-xs text-emerald-400/80 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-2.5 py-0.5">
+                  비디오
+                </span>
+              )}
             </div>
 
-            <audio
-              ref={audioRef}
-              controls
-              src={audioUrl}
-              className="w-full h-10 [&::-webkit-media-controls-panel]:bg-white/5 rounded-lg"
-            />
+            {videoOutputUrl ? (
+              <video
+                controls
+                src={videoOutputUrl}
+                className="w-full rounded-xl max-h-64 bg-black"
+              />
+            ) : (
+              <audio
+                ref={audioRef}
+                controls
+                src={audioUrl!}
+                className="w-full h-10 [&::-webkit-media-controls-panel]:bg-white/5 rounded-lg"
+              />
+            )}
 
             <a
-              href={audioUrl}
-              download={`dubbed_${targetLang}.mp3`}
+              href={videoOutputUrl ?? audioUrl!}
+              download={videoOutputUrl ? `dubbed_${targetLang}.mp4` : `dubbed_${targetLang}.wav`}
               className="flex items-center justify-center gap-2 w-full bg-white/8 hover:bg-white/12 border border-white/10 hover:border-white/20 font-medium text-sm py-3 rounded-xl transition-all duration-200 text-white/70 hover:text-white"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

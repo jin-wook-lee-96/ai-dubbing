@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@auth/core": "^0.34.3",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "@libsql/client": "^0.17.2",
     "@vercel/blob": "^2.3.1",
     "drizzle-orm": "^0.45.1",
