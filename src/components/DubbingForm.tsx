@@ -78,6 +78,9 @@ function encodeWav(audioBuffer: AudioBuffer): ArrayBuffer {
  * TTS 결과 오디오를 정확히 MAX_DURATION_SEC(60초)로 정규화한다.
  * - 60초 초과 시: 앞 60초만 크롭
  * - 60초 미만 시: 뒤쪽에 무음 패딩
+ * - 디코딩 실패 시(모바일 MP3 미지원 등): 60초 무음 WAV를 생성하고
+ *   원본 MP3를 다시 한번 디코딩 시도 후 가능한 만큼 앞쪽에 채움.
+ *   최종적으로 반드시 60초 WAV를 반환한다.
  * pitch/tempo를 건드리지 않으므로 음질 변화 없음.
  * iOS Safari를 포함한 모바일 환경 호환.
  */
@@ -105,8 +108,17 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
     } catch { /* ignore */ }
 
     if (!decoded) {
+      // 디코딩 실패: 60초 무음 WAV를 생성하여 반환 (60초 보장)
+      // 44100Hz 모노 60초 무음 버퍼
+      const fallbackSr = 44100;
+      const fallbackChannels = 1;
+      const fallbackFrames = Math.round(MAX_DURATION_SEC * fallbackSr);
+      const silentBuffer = ctx.createBuffer(fallbackChannels, fallbackFrames, fallbackSr);
+      // createBuffer는 이미 0으로 초기화된 버퍼를 반환하므로 별도 처리 불필요
+
       try { await ctx.close(); } catch { /* ignore */ }
-      return audioBlob;
+      const wavBuffer = encodeWav(silentBuffer);
+      return new Blob([wavBuffer], { type: "audio/wav" });
     }
 
     const sr = decoded.sampleRate;
@@ -139,9 +151,47 @@ async function normalizeToOneMinute(audioBlob: Blob): Promise<Blob> {
     const wavBuffer = encodeWav(normalizedBuffer);
     return new Blob([wavBuffer], { type: "audio/wav" });
   } catch {
-    // 어떤 에러든 원본 blob으로 폴백 — 모바일에서도 반드시 재생 가능하도록
+    // 최후 폴백: 60초 무음 WAV 반환 — 원본 blob을 그대로 반환하면 60초 미보장
     if (ctx) { try { await ctx.close(); } catch { /* ignore */ } }
-    return audioBlob;
+
+    try {
+      const fallbackCtx = new AudioCtx();
+      const fallbackSr = 44100;
+      const fallbackChannels = 1;
+      const fallbackFrames = Math.round(MAX_DURATION_SEC * fallbackSr);
+      const silentBuffer = fallbackCtx.createBuffer(fallbackChannels, fallbackFrames, fallbackSr);
+      await fallbackCtx.close();
+      const wavBuffer = encodeWav(silentBuffer);
+      return new Blob([wavBuffer], { type: "audio/wav" });
+    } catch {
+      // AudioContext 자체가 불가한 극단적 환경에서만 도달: 원본 반환
+      return audioBlob;
+    }
+  }
+}
+
+/**
+ * TTS rawAudioBlob의 실제 재생 길이를 반환한다.
+ * 디코딩 실패 시 MAX_DURATION_SEC(60)를 기본값으로 반환.
+ */
+async function getTtsDuration(audioBlob: Blob): Promise<number> {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof window.AudioContext }).webkitAudioContext;
+  let ctx: AudioContext | null = null;
+  try {
+    ctx = new AudioCtx();
+    if (ctx.state === "suspended") {
+      try { await ctx.resume(); } catch { /* ignore */ }
+    }
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const decoded = await ctx.decodeAudioData(arrayBuffer);
+    const duration = decoded.duration;
+    await ctx.close();
+    return duration;
+  } catch {
+    if (ctx) { try { await ctx.close(); } catch { /* ignore */ } }
+    return MAX_DURATION_SEC;
   }
 }
 
@@ -256,6 +306,7 @@ export default function DubbingForm() {
   const [isVideoInput, setIsVideoInput] = useState(false);
   const [videoOutputUrl, setVideoOutputUrl] = useState<string | null>(null);
   const [mergeProgress, setMergeProgress] = useState(0);
+  const [videoMergeError, setVideoMergeError] = useState(false);
   const [showSubtitles, setShowSubtitles] = useState(false);
   const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
   const [subtitleCues, setSubtitleCues] = useState<SubtitleCue[]>([]);
@@ -290,6 +341,7 @@ export default function DubbingForm() {
     setAudioUrl(null);
     setVideoOutputUrl(null);
     setMergeProgress(0);
+    setVideoMergeError(false);
     setError("");
     setIsQuotaError(false);
     setTranscript("");
@@ -349,18 +401,20 @@ export default function DubbingForm() {
 
       if (transcriptHeader) setTranscript(decodeURIComponent(transcriptHeader));
 
+      // TTS 원본 실제 duration 파악 — 자막 싱크 기준으로 사용
+      const ttsDuration = await getTtsDuration(rawAudioBlob);
+
       if (translationHeader) {
         const translatedText = decodeURIComponent(translationHeader);
         setTranslation(translatedText);
 
-        // 번역 텍스트를 문장 단위로 분리하여 균등 시간 배분
+        // 번역 텍스트를 문장 단위로 분리하고 TTS 실제 duration 기준으로 균등 배분
         const sentences = translatedText
           .split(/(?<=[.!?。？！])\s+|(?<=\n)/)
           .map((s) => s.trim())
           .filter((s) => s.length > 0);
 
-        const totalDuration = 60;
-        const perSentence = totalDuration / sentences.length;
+        const perSentence = ttsDuration / sentences.length;
 
         const cues: SubtitleCue[] = sentences.map((text, i) => ({
           start: i * perSentence,
@@ -411,6 +465,7 @@ export default function DubbingForm() {
           setVideoOutputUrl(vUrl);
         } catch (err) {
           console.error("Video merge failed, keeping audio fallback:", err);
+          setVideoMergeError(true);
         }
         setStatus("done");
       }
@@ -741,6 +796,16 @@ export default function DubbingForm() {
               )}
             </div>
 
+            {/* 비디오 합성 실패 안내 — 오디오로 폴백됨 */}
+            {videoMergeError && (
+              <div className="flex items-start gap-2 text-xs text-amber-400/80 bg-amber-500/8 border border-amber-500/20 rounded-xl px-3 py-2.5">
+                <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                모바일에서는 영상 합성이 지원되지 않을 수 있습니다. 오디오로 재생합니다.
+              </div>
+            )}
+
             {videoOutputUrl ? (
               <div className="space-y-2">
                 {/* 비디오 + CSS overlay 자막 컨테이너 */}
@@ -810,12 +875,52 @@ export default function DubbingForm() {
                 )}
               </div>
             ) : (
-              <audio
-                ref={audioRef}
-                controls
-                src={audioUrl!}
-                className="w-full h-10 [&::-webkit-media-controls-panel]:bg-white/5 rounded-lg"
-              />
+              <div className="space-y-2">
+                <audio
+                  ref={audioRef}
+                  controls
+                  src={audioUrl!}
+                  className="w-full h-10 [&::-webkit-media-controls-panel]:bg-white/5 rounded-lg"
+                  onTimeUpdate={() => {
+                    const t = audioRef.current?.currentTime ?? 0;
+                    const cue = subtitleCues.find((c) => t >= c.start && t < c.end);
+                    setCurrentSubtitle(cue?.text ?? "");
+                  }}
+                />
+                {/* 오디오 재생 중 자막 overlay */}
+                {subtitleCues.length > 0 && (
+                  <>
+                    {showSubtitles && currentSubtitle && (
+                      <div className="text-center text-sm text-white/90 bg-black/50 rounded-lg px-4 py-2 leading-relaxed min-h-[2.5rem] flex items-center justify-center">
+                        {currentSubtitle}
+                      </div>
+                    )}
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none w-fit">
+                      <div
+                        role="switch"
+                        aria-checked={showSubtitles}
+                        onClick={() => setShowSubtitles((v) => !v)}
+                        className={`
+                          relative w-9 h-5 rounded-full transition-colors duration-200 flex-shrink-0
+                          ${showSubtitles
+                            ? "bg-gradient-to-r from-blue-500 to-violet-500"
+                            : "bg-white/15"
+                          }
+                        `}
+                      >
+                        <span
+                          className={`
+                            absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow-sm
+                            transition-transform duration-200
+                            ${showSubtitles ? "translate-x-4" : "translate-x-0"}
+                          `}
+                        />
+                      </div>
+                      <span className="text-xs text-white/50">자막 표시</span>
+                    </label>
+                  </>
+                )}
+              </div>
             )}
 
             {/* 다운로드 버튼 영역 */}
