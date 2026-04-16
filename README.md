@@ -4,7 +4,7 @@
 
 **배포 URL:** https://ai-dubbing-seven.vercel.app
 
-<video src="https://github.com/user-attachments/assets/e2a203a6-5f81-4101-aab2-3677dc532ba1" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/56e1420d-1096-4273-bdd7-d9ce65f05152" controls width="100%"></video>
 
 ---
 
