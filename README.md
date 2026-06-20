@@ -4,7 +4,7 @@
 
 **배포 URL:** https://ai-dubbing-seven.vercel.app
 
-<video src="https://github.com/user-attachments/assets/56e1420d-1096-4273-bdd7-d9ce65f05152" controls width="100%"></video>
+<video src="https://github.com/jin-wook-lee-96/ai-dubbing/releases/download/v1.0-demo/demo_vedio_h264.mp4" controls width="100%"></video>
 
 ---
 
